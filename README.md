@@ -31,6 +31,11 @@ SEED_DEMO=true时启动自动执行种子；自然键查重，不覆盖用户修
 
 crash_after=N表示前N条日志已持久化。最近静止检查点保存全部数据页，检查点后数据页假定均未写回（no-force）。恢复重放日志写入和已abort的撤销，再按LSN倒序撤销未结束事务。独立oracle从检查点账本仅应用已提交事务写入，结果须相同。输出重做/撤销轨迹、事务集合、各阶段账本、SHA256和模型版本。空输入、未知键、事务顺序非法、检查点有活动事务、写锁冲突、崩溃点超限均拒绝。模型不涉及页LSN、CLR、模糊检查点或真实磁盘故障；不是完整ARIES实现。
 
+## 已发布账本：区间翻查与版本切换
+每次恢复成功后随恢复生成持久账本索引（ledger_index_points，按值+点号有序）并发布新版（ledger_versions）。值班员在恢复演练页按数值区间查同一日志集的已发布账本：同值按点号升序，键集翻页凭据（ledger_page_tokens，默认有效期10分钟，PAGE_TOKEN_TTL_SECONDS可调）在有效期内始终翻凭据绑定的原版，不漏点、不重读；过期或重复使用返回410拒绝续翻。
+
+新版账本与新索引在同一事务一次性切换。重建失败（可由LEDGER_FAIL_RECOVERY_IDS注入演练）时整体回滚、保留旧版继续查询，POST /ledger-versions/retry 重试；recovery_id 唯一约束保证重试不重复发布。同一日志集最多保留一份旧版：旧版仍有有效凭据时第三版保持 pending 等候，凭据过期槽位空出后再发布，旧版随之清理下架。GET /ledger-versions 查看版本状态，POST /ledger-query 发起区间查询或带凭据续翻。
+
 ## 工程与开发
 前端原生HTML/CSS/JS+Nginx1.27；后端Python3.11+FastAPI+SQLAlchemy+PyJWT；PostgreSQL16和Redis7；5服务均healthcheck。持久任务队列在PG，单worker通过Redis锁互斥。20条待执行配额，审计记录写入操作，JWT8小时、PBKDF2随机盐密码。后端路由不含/api，Nginx/api/去前缀代理。
 
@@ -39,3 +44,5 @@ crash_after=N表示前N条日志已持久化。最近静止检查点保存全部
 环境COMPOSE_PROJECT_NAME控制命名，FRONTEND_PORT/BACKEND_PORT/DB_PORT为18246/19246/17746，DB_PASSWORD控制演示数据库密码，JWT_SECRET签名密钥，SEED_DEMO控制种子。命名卷db-data/redis-data/artifacts；共享artifacts预留，导出由冻结快照即时生成。Google Fonts需外网，业务离线可运行。默认凭据仅本地演示。
 
 共享枚举roles与任务states定义于backend/src/constants/enums.py、frontend/src/constants/enums.js，状态使用models/entities.py/services/recovery_service.py/worker.py/components/common/status.js；日志操作类型在schemas/log_set.py和pages/logs.js中声明/说明。MIT许可。真实验证见批次test-artifacts/gb-4107/TESTING.md。
+
+本地无Docker时可用SQLite跑账本验证（不改变生产PostgreSQL方言，DDL已核对两种方言）：`uv venv .venv && uv pip install -r backend/requirements.txt httpx`，然后 `.venv/bin/python -I tests/test_ledger_publish.py`（三次恢复：同值跨页不漏不重、重建失败保留旧版且重试不重复发布、等候期间新旧查询与过期释放槽位，28项断言）与 `.venv/bin/python -I tests/test_ledger_http.py`（FastAPI鉴权/路由/凭据全链路，17项断言）。worker无Redis时自动降级为进程内锁，仅用于本地测试。
